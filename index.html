@@ -93,8 +93,13 @@
                         // NOTE: If deploying to GitHub Pages outside of this tool, you must supply 
                         // your own free Firebase Config below to enable multi-device syncing!
                         config = { 
-                            apiKey: "demo", 
-                            projectId: "demo" 
+                            apiKey: "AIzaSyBT9P8CRK29rncgG95KcIFIRcncoNmZq54",
+                            authDomain: "suits-family-bank.firebaseapp.com",
+                            projectId: "suits-family-bank",
+                            storageBucket: "suits-family-bank.firebasestorage.app",
+                            messagingSenderId: "773324989861",
+                            appId: "1:773324989861:web:768785e7bfb627d0cc344c",
+                            measurementId: "G-6P3SZWJYT1"
                         };
                     }
 
@@ -175,14 +180,23 @@
                 if (auth && fb) {
                     try {
                         const provider = new fb.GoogleAuthProvider();
-                        await fb.signInWithPopup(auth, provider);
-                        setCurrentUser(profile);
+                        const result = await fb.signInWithPopup(auth, provider);
+                        const userEmail = result.user.email.toLowerCase();
+                        
+                        const AUTHORIZED_EMAILS = ['mattsuits@gmail.com', 'meredithsuits@gmail.com'];
+                        
+                        if (AUTHORIZED_EMAILS.includes(userEmail)) {
+                            setCurrentUser(profile);
+                        } else {
+                            await auth.signOut();
+                            setError("Unauthorized email address. Access denied.");
+                        }
                     } catch (err) {
-                        console.warn("Google Login bypassed or failed, continuing locally.", err);
-                        setCurrentUser(profile);
+                        console.error("Login failed.", err);
+                        setError("Google sign-in failed or was cancelled.");
                     }
                 } else {
-                    setCurrentUser(profile);
+                    setError("Database not connected. Cannot authenticate.");
                 }
             };
 
