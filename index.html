@@ -62,7 +62,16 @@
             const [auth, setAuth] = useState(null);
             const [userAuth, setUserAuth] = useState(null);
             
-            const [currentUser, setCurrentUser] = useState(null);
+            // REMEMBER THE PROFILE ACROSS REFRESHES
+            const [currentUser, setCurrentUser] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('sfb_active_profile');
+                    return saved ? JSON.parse(saved) : null;
+                } catch {
+                    return null;
+                }
+            });
+
             const [chores, setChores] = useState([]);
             const [customAvatars, setCustomAvatars] = useState({});
             const [loading, setLoading] = useState(true);
@@ -90,8 +99,6 @@
                     if (typeof __firebase_config !== 'undefined') {
                         config = JSON.parse(__firebase_config);
                     } else {
-                        // NOTE: If deploying to GitHub Pages outside of this tool, you must supply 
-                        // your own free Firebase Config below to enable multi-device syncing!
                         config = { 
                             apiKey: "AIzaSyBT9P8CRK29rncgG95KcIFIRcncoNmZq54",
                             authDomain: "suits-family-bank.firebaseapp.com",
@@ -116,7 +123,6 @@
                             setUserAuth(user);
                         });
 
-                        // Prioritize custom tokens if available, else anonymous connection
                         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                             signInWithCustomToken(authInstance, __initial_auth_token).catch(console.error);
                         } else {
@@ -140,14 +146,12 @@
             useEffect(() => {
                 if (!userAuth || !db || !fb) return;
 
-                // Sync Chores
                 const choresRef = fb.collection(db, 'artifacts', appId, 'public', 'data', 'chores');
                 const unsubscribeChores = fb.onSnapshot(choresRef, (snapshot) => {
                     const choresData = [];
                     snapshot.forEach((doc) => {
                         choresData.push({ id: doc.id, ...doc.data() });
                     });
-                    // Sort newest first
                     choresData.sort((a, b) => {
                         const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
                         const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
@@ -160,7 +164,6 @@
                     setLoading(false);
                 });
 
-                // Sync Avatars
                 const avatarsRef = fb.collection(db, 'artifacts', appId, 'public', 'data', 'avatars');
                 const unsubscribeAvatars = fb.onSnapshot(avatarsRef, (snapshot) => {
                     const avatarData = {};
@@ -187,6 +190,7 @@
                         
                         if (AUTHORIZED_EMAILS.includes(userEmail)) {
                             setCurrentUser(profile);
+                            localStorage.setItem('sfb_active_profile', JSON.stringify(profile)); // SAVE TO DEVICE
                         } else {
                             await auth.signOut();
                             setError("Unauthorized email address. Access denied.");
@@ -226,7 +230,6 @@
 
             const toggleChoreStatus = async (chore) => {
                 if (!db || !fb) return;
-                // Only assignee or parent can toggle
                 if (currentUser.role === 'kid' && currentUser.name !== chore.assignee) return;
 
                 const newStatus = chore.status === 'pending' ? 'completed' : 'pending';
@@ -280,7 +283,6 @@
                 reader.onload = (event) => {
                     const img = new Image();
                     img.onload = async () => {
-                        // Compress and resize avatar inline for fast syncing
                         const canvas = document.createElement('canvas');
                         const MAX_SIZE = 150;
                         let width = img.width;
@@ -358,7 +360,6 @@
                 });
             }, [chores, historyFilter]);
 
-            // Default to initials service if no photo is uploaded yet
             const getAvatar = (id, name) => customAvatars[id] || `https://ui-avatars.com/api/?name=${name}&background=random`;
 
             if (!currentUser) {
@@ -394,7 +395,10 @@
                                     </h2>
                                     <div className="grid grid-cols-2 gap-4">
                                         {DEFAULT_PROFILES.kids.map(profile => (
-                                            <button key={profile.id} onClick={() => setCurrentUser(profile)}
+                                            <button key={profile.id} onClick={() => {
+                                                setCurrentUser(profile);
+                                                localStorage.setItem('sfb_active_profile', JSON.stringify(profile)); // SAVE TO DEVICE
+                                            }}
                                                 className="flex flex-col items-center justify-center p-4 bg-slate-50 rounded-2xl hover:bg-emerald-50 border border-slate-100 group transition-all active:scale-95">
                                                 <img src={getAvatar(profile.id, profile.name)} className="w-16 h-16 rounded-full object-cover mb-2 border-2 border-white shadow-sm group-hover:scale-105 transition-transform"/>
                                                 <span className="font-bold text-slate-700">{profile.name}</span>
@@ -412,7 +416,6 @@
                 <div className="min-h-screen pb-20">
                     <input type="file" accept="image/*" ref={fileInputRef} onChange={handleImageUpload} className="hidden" />
 
-                    {/* App Header */}
                     <header className="bg-white shadow-sm sticky top-0 z-40 border-b border-slate-100">
                         <div className="max-w-3xl mx-auto px-4 h-16 flex items-center justify-between">
                             <div className="flex items-center gap-3">
@@ -428,7 +431,12 @@
                                         <i className="fas fa-cog"></i>
                                     </button>
                                 )}
-                                <button onClick={() => setCurrentUser(null)} className="p-2 text-slate-400 hover:text-slate-600 bg-slate-50 hover:bg-slate-100 rounded-full transition-colors">
+                                {/* PROPER SIGN OUT TO CLEAR MEMORY */}
+                                <button onClick={() => {
+                                    setCurrentUser(null);
+                                    localStorage.removeItem('sfb_active_profile');
+                                    if (auth && currentUser?.role === 'parent') auth.signOut();
+                                }} className="p-2 text-slate-400 hover:text-slate-600 bg-slate-50 hover:bg-slate-100 rounded-full transition-colors">
                                     <i className="fas fa-sign-out-alt"></i>
                                 </button>
                             </div>
@@ -442,7 +450,6 @@
                         </div>
                     )}
 
-                    {}
                     {showSettings && currentUser.role === 'parent' && (
                         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
                             <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl">
@@ -472,11 +479,8 @@
                     )}
 
                     <main className="max-w-3xl mx-auto p-4 space-y-8 mt-4">
-                        
-                        {}
                         {currentUser.role === 'parent' && (
                             <div className="space-y-8">
-                                
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     {DEFAULT_PROFILES.kids.map(kid => (
                                         <div key={kid.id} className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 relative overflow-hidden group">
@@ -581,7 +585,6 @@
                                     </div>
                                 </div>
 
-                                {}
                                 <div className="pt-6 border-t border-slate-200">
                                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-3">
                                         <h2 className="text-xl font-bold text-slate-800 flex items-center"><i className="fas fa-history text-indigo-600 mr-2"></i>Payout History</h2>
@@ -621,7 +624,6 @@
                             </div>
                         )}
 
-                        {}
                         {currentUser.role === 'kid' && (
                             <div className="space-y-6">
                                 <div className="bg-gradient-to-br from-indigo-500 to-purple-600 rounded-3xl p-6 sm:p-8 text-white shadow-lg relative overflow-hidden">
@@ -676,7 +678,6 @@
             );
         }
 
-        // Initialize React App
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
     </script>
