@@ -85,6 +85,12 @@
                 title: '', amount: '', assignee: 'Sam', dayOfWeek: 'Anytime', isWeekly: false 
             });
 
+            // Edit & Transfer States
+            const [editingChore, setEditingChore] = useState(null);
+            const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+            const [transferAmount, setTransferAmount] = useState('');
+            const [transferChild, setTransferChild] = useState(null);
+
             // Avatar Upload References
             const fileInputRef = useRef(null);
             const [uploadingFor, setUploadingFor] = useState(null);
@@ -190,7 +196,7 @@
                         
                         if (AUTHORIZED_EMAILS.includes(userEmail)) {
                             setCurrentUser(profile);
-                            localStorage.setItem('sfb_active_profile', JSON.stringify(profile)); // SAVE TO DEVICE
+                            localStorage.setItem('sfb_active_profile', JSON.stringify(profile)); 
                         } else {
                             await auth.signOut();
                             setError("Unauthorized email address. Access denied.");
@@ -203,6 +209,15 @@
                     setError("Database not connected. Cannot authenticate.");
                 }
             };
+
+            const balances = useMemo(() => {
+                return DEFAULT_PROFILES.kids.reduce((acc, kid) => {
+                    acc[kid.name] = chores
+                        .filter(c => c.assignee === kid.name && c.status === 'completed')
+                        .reduce((sum, c) => sum + c.amount, 0);
+                    return acc;
+                }, {});
+            }, [chores]);
 
             const handleAddChore = async (e) => {
                 e.preventDefault();
@@ -225,6 +240,26 @@
                 } catch (err) {
                     console.error(err);
                     setError("Failed to assign chore.");
+                }
+            };
+
+            const handleEditSubmit = async (e) => {
+                e.preventDefault();
+                if (!editingChore.title || !editingChore.amount || !db || !fb) return;
+
+                try {
+                    const choreRef = fb.doc(db, 'artifacts', appId, 'public', 'data', 'chores', editingChore.id);
+                    await fb.updateDoc(choreRef, {
+                        title: editingChore.title,
+                        amount: parseFloat(editingChore.amount),
+                        assignee: editingChore.assignee,
+                        dayOfWeek: editingChore.dayOfWeek,
+                        isWeekly: editingChore.isWeekly
+                    });
+                    setEditingChore(null);
+                } catch (err) {
+                    console.error(err);
+                    setError("Failed to update chore.");
                 }
             };
 
@@ -254,19 +289,71 @@
                 }
             };
 
-            const handlePayout = async (kidName) => {
+            const openTransferModal = (kidName) => {
+                setTransferChild(kidName);
+                setTransferAmount(balances[kidName].toFixed(2));
+                setIsTransferModalOpen(true);
+            };
+
+            const submitTransfer = async () => {
                 if (!db || !fb || currentUser.role !== 'parent') return;
-                const choresToPay = chores.filter(c => c.assignee === kidName && c.status === 'completed');
-                if (choresToPay.length === 0) return;
+                let amountRemaining = parseFloat(transferAmount);
+                if (isNaN(amountRemaining) || amountRemaining <= 0) {
+                    setError("Please enter a valid transfer amount.");
+                    return;
+                }
+
+                if (amountRemaining > balances[transferChild]) {
+                    setError(`Cannot transfer more than the available balance ($${balances[transferChild].toFixed(2)}).`);
+                    return;
+                }
+
+                // Sort oldest completed chores first
+                const choresToPay = chores
+                    .filter(c => c.assignee === transferChild && c.status === 'completed')
+                    .sort((a, b) => (a.createdAt?.toMillis() || 0) - (b.createdAt?.toMillis() || 0));
 
                 try {
-                    await Promise.all(choresToPay.map(chore => {
+                    for (const chore of choresToPay) {
+                        if (amountRemaining <= 0) break;
+
                         const choreRef = fb.doc(db, 'artifacts', appId, 'public', 'data', 'chores', chore.id);
-                        return fb.updateDoc(choreRef, { status: 'paid', paidAt: fb.serverTimestamp() });
-                    }));
+                        
+                        if (amountRemaining >= chore.amount) {
+                            // Pay this chore completely
+                            await fb.updateDoc(choreRef, { status: 'paid', paidAt: fb.serverTimestamp() });
+                            amountRemaining -= chore.amount;
+                            // Fix JS floating point drift
+                            amountRemaining = Math.round(amountRemaining * 100) / 100;
+                        } else {
+                            // Partially pay this chore: split it into two records
+                            const remainingChoreAmount = chore.amount - amountRemaining;
+                            
+                            // 1. Mark original chore as paid with partial amount
+                            await fb.updateDoc(choreRef, { status: 'paid', amount: amountRemaining, paidAt: fb.serverTimestamp() });
+                            
+                            // 2. Create a new "completed" chore for the leftover balance
+                            const choresCollRef = fb.collection(db, 'artifacts', appId, 'public', 'data', 'chores');
+                            await fb.addDoc(choresCollRef, {
+                                title: chore.title + ' (Remainder)',
+                                amount: remainingChoreAmount,
+                                assignee: chore.assignee,
+                                dayOfWeek: chore.dayOfWeek,
+                                isWeekly: false, // Do not duplicate recurring flag on the remainder
+                                status: 'completed',
+                                createdBy: chore.createdBy,
+                                createdAt: chore.createdAt || fb.serverTimestamp()
+                            });
+                            
+                            amountRemaining = 0;
+                        }
+                    }
+                    setIsTransferModalOpen(false);
+                    setTransferAmount('');
+                    setTransferChild(null);
                 } catch (err) {
                     console.error(err);
-                    setError("Failed to record payout.");
+                    setError("Failed to process partial transfer.");
                 }
             };
 
@@ -315,15 +402,6 @@
                 reader.readAsDataURL(file);
                 e.target.value = '';
             };
-
-            const balances = useMemo(() => {
-                return DEFAULT_PROFILES.kids.reduce((acc, kid) => {
-                    acc[kid.name] = chores
-                        .filter(c => c.assignee === kid.name && c.status === 'completed')
-                        .reduce((sum, c) => sum + c.amount, 0);
-                    return acc;
-                }, {});
-            }, [chores]);
 
             const kidChoresByDay = useMemo(() => {
                 if (!currentUser || currentUser.role !== 'kid') return {};
@@ -397,7 +475,7 @@
                                         {DEFAULT_PROFILES.kids.map(profile => (
                                             <button key={profile.id} onClick={() => {
                                                 setCurrentUser(profile);
-                                                localStorage.setItem('sfb_active_profile', JSON.stringify(profile)); // SAVE TO DEVICE
+                                                localStorage.setItem('sfb_active_profile', JSON.stringify(profile)); 
                                             }}
                                                 className="flex flex-col items-center justify-center p-4 bg-slate-50 rounded-2xl hover:bg-emerald-50 border border-slate-100 group transition-all active:scale-95">
                                                 <img src={getAvatar(profile.id, profile.name)} className="w-16 h-16 rounded-full object-cover mb-2 border-2 border-white shadow-sm group-hover:scale-105 transition-transform"/>
@@ -431,7 +509,6 @@
                                         <i className="fas fa-cog"></i>
                                     </button>
                                 )}
-                                {/* PROPER SIGN OUT TO CLEAR MEMORY */}
                                 <button onClick={() => {
                                     setCurrentUser(null);
                                     localStorage.removeItem('sfb_active_profile');
@@ -450,6 +527,7 @@
                         </div>
                     )}
 
+                    {/* SETTINGS MODAL */}
                     {showSettings && currentUser.role === 'parent' && (
                         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
                             <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl">
@@ -478,6 +556,82 @@
                         </div>
                     )}
 
+                    {/* TRANSFER MODAL */}
+                    {isTransferModalOpen && currentUser.role === 'parent' && (
+                        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl">
+                                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                                    <h2 className="font-bold text-lg"><i className="fas fa-exchange-alt text-indigo-600 mr-2"></i>Transfer Funds</h2>
+                                    <button onClick={() => setIsTransferModalOpen(false)} className="text-slate-400 bg-slate-50 rounded-full p-2 hover:bg-slate-100 transition-colors"><i className="fas fa-times"></i></button>
+                                </div>
+                                <div className="p-6">
+                                    <p className="text-sm text-slate-500 mb-4">Specify the amount to transfer to {transferChild}'s external account. Max available: <strong>${balances[transferChild]?.toFixed(2)}</strong></p>
+                                    
+                                    <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Amount ($)</label>
+                                    <input 
+                                        type="number" 
+                                        step="0.25" 
+                                        max={balances[transferChild]} 
+                                        value={transferAmount} 
+                                        onChange={e => setTransferAmount(e.target.value)} 
+                                        className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none mb-6 text-lg font-bold text-slate-800" 
+                                    />
+                                    
+                                    <button onClick={submitTransfer} className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-indigo-700 transition-colors active:scale-95">
+                                        Confirm Transfer
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* EDIT MODAL */}
+                    {editingChore && currentUser.role === 'parent' && (
+                        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl">
+                                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                                    <h2 className="font-bold text-lg"><i className="fas fa-edit text-indigo-600 mr-2"></i>Edit Chore</h2>
+                                    <button onClick={() => setEditingChore(null)} className="text-slate-400 bg-slate-50 rounded-full p-2 hover:bg-slate-100 transition-colors"><i className="fas fa-times"></i></button>
+                                </div>
+                                <form onSubmit={handleEditSubmit} className="p-6 space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Chore Title</label>
+                                        <input type="text" value={editingChore.title} onChange={e => setEditingChore({...editingChore, title: e.target.value})} className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all" required />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Assign To</label>
+                                            <select value={editingChore.assignee} onChange={e => setEditingChore({...editingChore, assignee: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none">
+                                                {DEFAULT_PROFILES.kids.map(k => <option key={k.id}>{k.name}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Amount ($)</label>
+                                            <input type="number" step="0.25" value={editingChore.amount} onChange={e => setEditingChore({...editingChore, amount: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none" required />
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4 items-center">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 mb-1 uppercase tracking-wide">Ideal Day</label>
+                                            <select value={editingChore.dayOfWeek} onChange={e => setEditingChore({...editingChore, dayOfWeek: e.target.value})} className="w-full p-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none">
+                                                {DAYS_OF_WEEK.map(d => <option key={d}>{d}</option>)}
+                                            </select>
+                                        </div>
+                                        <div className="pt-5">
+                                            <label className="flex items-center gap-2 cursor-pointer group">
+                                                <input type="checkbox" checked={editingChore.isWeekly} onChange={e => setEditingChore({...editingChore, isWeekly: e.target.checked})} className="w-5 h-5 accent-indigo-600 cursor-pointer" />
+                                                <span className="text-sm font-semibold text-slate-700 group-hover:text-indigo-600 transition-colors">Recurring Weekly</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div className="pt-4 mt-2 border-t border-slate-100">
+                                        <button type="submit" className="w-full bg-slate-900 text-white py-3.5 rounded-xl font-bold shadow-md hover:bg-slate-800 transition-colors active:scale-95">Save Changes</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
                     <main className="max-w-3xl mx-auto p-4 space-y-8 mt-4">
                         {currentUser.role === 'parent' && (
                             <div className="space-y-8">
@@ -494,7 +648,7 @@
                                             <div className="text-4xl font-extrabold text-slate-800 my-2 relative z-10">${balances[kid.name].toFixed(2)}</div>
                                             
                                             <button 
-                                                onClick={() => handlePayout(kid.name)}
+                                                onClick={() => openTransferModal(kid.name)}
                                                 disabled={balances[kid.name] === 0}
                                                 className={`mt-4 w-full py-3.5 rounded-2xl font-semibold flex items-center justify-center gap-2 transition-all relative z-10 ${
                                                     balances[kid.name] > 0 ? 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-md shadow-indigo-200' : 'bg-slate-100 text-slate-400 cursor-not-allowed'
@@ -573,7 +727,16 @@
                                                         </div>
                                                     </div>
                                                 </div>
-                                                <button onClick={() => deleteChore(chore.id)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 p-2.5 rounded-xl transition-colors ml-2"><i className="fas fa-trash"></i></button>
+                                                
+                                                {/* Consistent Edit & Delete Buttons for Active Chores */}
+                                                <div className="flex items-center gap-1 ml-2">
+                                                    <button onClick={() => setEditingChore(chore)} className="text-slate-300 hover:text-blue-500 hover:bg-blue-50 p-2.5 rounded-xl transition-colors">
+                                                        <i className="fas fa-edit"></i>
+                                                    </button>
+                                                    <button onClick={() => deleteChore(chore.id)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 p-2.5 rounded-xl transition-colors">
+                                                        <i className="fas fa-trash"></i>
+                                                    </button>
+                                                </div>
                                             </div>
                                         ))}
                                         {chores.filter(c => c.status !== 'paid').length === 0 && (
@@ -610,12 +773,25 @@
                                     </div>
                                     <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden divide-y divide-slate-50">
                                         {filteredHistory.map(chore => (
-                                            <div key={chore.id} className="p-4 flex justify-between items-center hover:bg-slate-50 transition-colors">
-                                                <div>
+                                            <div key={chore.id} className="p-4 flex justify-between items-center hover:bg-slate-50 transition-colors group">
+                                                <div className="flex-1">
                                                     <p className="font-semibold text-slate-700">{chore.title}</p>
                                                     <p className="text-xs text-slate-400 font-medium mt-0.5">Paid to {chore.assignee}'s Account</p>
                                                 </div>
-                                                <span className="font-bold text-slate-800 bg-slate-100 px-3 py-1 rounded-lg">${chore.amount.toFixed(2)}</span>
+                                                
+                                                <div className="flex items-center gap-3">
+                                                    <span className="font-bold text-slate-800 bg-slate-100 px-3 py-1 rounded-lg">${chore.amount.toFixed(2)}</span>
+                                                    
+                                                    {/* Consistent Edit & Delete Buttons for Paid History */}
+                                                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                        <button onClick={() => setEditingChore(chore)} className="text-slate-300 hover:text-blue-500 hover:bg-blue-50 p-2 rounded-xl transition-colors">
+                                                            <i className="fas fa-edit"></i>
+                                                        </button>
+                                                        <button onClick={() => deleteChore(chore.id)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 p-2 rounded-xl transition-colors">
+                                                            <i className="fas fa-trash"></i>
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             </div>
                                         ))}
                                         {filteredHistory.length === 0 && <p className="p-8 text-center text-slate-400 font-medium text-sm">No payouts found for this timeframe.</p>}
